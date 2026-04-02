@@ -1,0 +1,288 @@
+# OpenClaw Docs Sync - GitHub Actions Workflow
+# 自动从主仓库同步文档，构建 Skill 包，发布 Release
+
+name: Sync and Build Docs
+
+on:
+  # 1. 定时同步：每天 UTC 02:00 运行（北京时间 10:00）
+  schedule:
+    - cron: '0 2 * * *'
+  
+  # 2. 手动触发
+  workflow_dispatch:
+    inputs:
+      force_rebuild:
+        description: '强制重新构建（忽略缓存）'
+        required: false
+        default: false
+        type: boolean
+      skip_release:
+        description: '跳过发布 Release'
+        required: false
+        default: false
+        type: boolean
+  
+  # 3. 监听上游仓库的 repository_dispatch 事件
+  repository_dispatch:
+    types: [docs-updated]
+
+env:
+  UPSTREAM_REPO: https://github.com/openclaw/openclaw.git
+  DOCS_BRANCH: main
+  PYTHON_VERSION: '3.11'
+
+jobs:
+  # Job 1: 检查上游是否有更新
+  check-upstream:
+    runs-on: ubuntu-latest
+    outputs:
+      has_update: ${{ steps.check.outputs.has_update }}
+      upstream_sha: ${{ steps.check.outputs.upstream_sha }}
+      upstream_date: ${{ steps.check.outputs.upstream_date }}
+    steps:
+      - name: Checkout sync repo
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Get last sync commit
+        id: last-sync
+        run: |
+          if [ -f .last-sync-commit ]; then
+            echo "commit=$(cat .last-sync-commit)" >> $GITHUB_OUTPUT
+          else
+            echo "commit=none" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Check upstream changes
+        id: check
+        run: |
+          # 克隆上游仓库（浅克隆）
+          git clone --depth 1 --filter=blob:none --sparse \
+            ${{ env.UPSTREAM_REPO }} upstream-temp
+          
+          cd upstream-temp
+          # 只检出 docs 目录
+          git sparse-checkout set docs
+          
+          # 获取最新 commit
+          UPSTREAM_SHA=$(git rev-parse HEAD)
+          UPSTREAM_DATE=$(git log -1 --format=%cd --date=iso)
+          
+          echo "upstream_sha=${UPSTREAM_SHA}" >> $GITHUB_OUTPUT
+          echo "upstream_date=${UPSTREAM_DATE}" >> $GITHUB_OUTPUT
+          
+          # 比较上次同步的 commit
+          if [ "${{ steps.last-sync.outputs.commit }}" = "${UPSTREAM_SHA}" ] && \
+             [ "${{ github.event.inputs.force_rebuild }}" != "true" ]; then
+            echo "has_update=false" >> $GITHUB_OUTPUT
+            echo "📦 文档已是最新，无需同步"
+          else
+            echo "has_update=true" >> $GITHUB_OUTPUT
+            echo "🔄 发现更新，需要同步"
+            echo "上次: ${{ steps.last-sync.outputs.commit }}"
+            echo "本次: ${UPSTREAM_SHA}"
+          fi
+
+  # Job 2: 构建文档和 Skill 包
+  build:
+    needs: check-upstream
+    if: needs.check-upstream.outputs.has_update == 'true' || github.event.inputs.force_rebuild == 'true'
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - name: Checkout sync repo
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          # 如果有 requirements.txt 可以安装
+          if [ -f requirements.txt ]; then
+            pip install -r requirements.txt
+          fi
+
+      - name: Clone and process docs
+        run: |
+          mkdir -p docs-cache
+          
+          # 使用 sparse checkout 只拉取 docs/
+          git clone --depth 1 --filter=blob:none --sparse \
+            ${{ env.UPSTREAM_REPO }} docs-temp
+          
+          cd docs-temp
+          git sparse-checkout set docs
+          
+          # 移动 docs 内容
+          mv docs/* ../docs-cache/
+          cd ..
+          rm -rf docs-temp
+
+      - name: Filter non-English docs
+        run: |
+          cd docs-cache
+          
+          # 移除多语言目录
+          for lang in zh-CN ja-JP ko-KR de-DE fr-FR es-ES; do
+            if [ -d "$lang" ]; then
+              echo "🗑️  移除: $lang/"
+              rm -rf "$lang"
+            fi
+          done
+          
+          # 移除 i18n 目录
+          if [ -d ".i18n" ]; then
+            rm -rf ".i18n"
+          fi
+          
+          # 统计
+          echo "📊 过滤后的文档统计:"
+          find . -name "*.md" | wc -l
+
+      - name: Clean documentation
+        run: |
+          python scripts/clean-docs.py docs-cache
+
+      - name: Generate index
+        run: |
+          python scripts/build-index.py --docs-path docs-cache
+
+      - name: Prepare Skill package
+        run: |
+          # 创建发布目录
+          mkdir -p release
+          
+          # 复制必要文件
+          cp -r scripts release/
+          cp SKILL.md README.md DISTRIBUTION.md release/
+          cp docs-index.json release/ 2>/dev/null || true
+          
+          # 复制清洗后的文档（离线版）
+          cp -r docs-cache release/docs
+          
+          # 生成版本号
+          VERSION=$(date +%Y%m%d)-${{ needs.check-upstream.outputs.upstream_sha:0:7 }}
+          echo "version=${VERSION}" >> $GITHUB_ENV
+          echo "version=${VERSION}" >> $GITHUB_OUTPUT
+
+      - name: Build offline package
+        run: |
+          cd release
+          tar -czf ../openclaw-docs-offline-${VERSION}.tar.gz \
+            --exclude='__pycache__' \
+            --exclude='*.pyc' \
+            .
+          cd ..
+          
+          # 创建轻量版（不含 docs）
+          mkdir -p release-lite
+          cp -r release/scripts release-lite/
+          cp release/SKILL.md release/README.md release/DISTRIBUTION.md release-lite/
+          cp release/docs-index.json release-lite/ 2>/dev/null || true
+          
+          cd release-lite
+          tar -czf ../openclaw-docs-lite-${VERSION}.tar.gz \
+            --exclude='__pycache__' \
+            --exclude='*.pyc' \
+            .
+          cd ..
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: skill-packages
+          path: |
+            openclaw-docs-offline-*.tar.gz
+            openclaw-docs-lite-*.tar.gz
+          retention-days: 30
+
+      - name: Save sync state
+        run: |
+          echo "${{ needs.check-upstream.outputs.upstream_sha }}" > .last-sync-commit
+          echo "${{ needs.check-upstream.outputs.upstream_date }}" > .last-sync-date
+          
+          git config user.name "GitHub Actions"
+          git config user.email "actions@github.com"
+          git add .last-sync-commit .last-sync-date
+          git diff --cached --quiet || git commit -m "docs: sync to ${{ needs.check-upstream.outputs.upstream_sha:0:7 }}"
+          git push
+
+  # Job 3: 发布 Release
+  release:
+    needs: [check-upstream, build]
+    if: |
+      (needs.check-upstream.outputs.has_update == 'true' || github.event.inputs.force_rebuild == 'true') &&
+      github.event.inputs.skip_release != 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: skill-packages
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: v${{ needs.build.outputs.version }}
+          name: OpenClaw Docs ${{ needs.build.outputs.version }}
+          body: |
+            ## 📚 OpenClaw 文档同步更新
+            
+            **同步来源**: [openclaw/openclaw@${{ needs.check-upstream.outputs.upstream_sha:0:7 }}](https://github.com/openclaw/openclaw/commit/${{ needs.check-upstream.outputs.upstream_sha }})
+            
+            **更新时间**: ${{ needs.check-upstream.outputs.upstream_date }}
+            
+            ### 📦 包含内容
+            - ✅ 仅英文文档（已过滤 zh-CN, ja-JP 等）
+            - ✅ 内容清洗（移除 HTML 注释等）
+            - ✅ 完整索引（支持快速搜索）
+            
+            ### 📥 下载
+            
+            | 版本 | 大小 | 说明 |
+            |------|------|------|
+            | `openclaw-docs-offline-*.tar.gz` | ~8MB | 离线版，开箱即用 |
+            | `openclaw-docs-lite-*.tar.gz` | ~200KB | 轻量版，首次使用自动下载 |
+            
+            ### 🚀 快速开始
+            
+            ```bash
+            # 离线版
+            tar -xzf openclaw-docs-offline-*.tar.gz
+            cd openclaw-docs
+            python scripts/search-docs.py "multi-agent"
+            
+            # 轻量版
+            tar -xzf openclaw-docs-lite-*.tar.gz
+            cd openclaw-docs
+            python scripts/setup.py  # 自动拉取文档
+            ```
+          files: |
+            openclaw-docs-offline-*.tar.gz
+            openclaw-docs-lite-*.tar.gz
+          generate_release_notes: false
+
+  # Job 4: 通知（可选）
+  notify:
+    needs: [check-upstream, build, release]
+    if: always() && needs.check-upstream.outputs.has_update == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Send notification
+        run: |
+          if [ "${{ needs.build.result }}" = "success" ] && [ "${{ needs.release.result }}" = "success" ]; then
+            echo "✅ 文档同步成功！"
+            echo "版本: ${{ needs.build.outputs.version }}"
+          else
+            echo "❌ 文档同步失败"
+            exit 1
+          fi

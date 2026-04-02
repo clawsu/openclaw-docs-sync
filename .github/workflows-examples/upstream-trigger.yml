@@ -1,0 +1,30 @@
+# 此文件应放置在 openclaw/openclaw 仓库的 .github/workflows/ 目录下
+# 当 docs/ 目录有更新时，触发下游文档同步仓库
+
+name: Notify Docs Sync
+
+on:
+  push:
+    branches: [main, master]
+    paths:
+      - 'docs/**'
+
+jobs:
+  notify:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Trigger docs sync
+        run: |
+          curl -X POST \
+            -H "Authorization: token ${{ secrets.DOCS_SYNC_TOKEN }}" \
+            -H "Accept: application/vnd.github.v3+json" \
+            https://api.github.com/repos/YOUR_USERNAME/openclaw-docs-sync/dispatches \
+            -d '{
+              "event_type": "docs-updated",
+              "client_payload": {
+                "sha": "${{ github.sha }}",
+                "ref": "${{ github.ref }}",
+                "message": "${{ github.event.head_commit.message }}",
+                "author": "${{ github.event.head_commit.author.name }}"
+              }
+            }'

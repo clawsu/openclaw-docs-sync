@@ -1,0 +1,36 @@
+# OpenClaw Docs Sync - Git Ignore
+
+# 自动生成/缓存文件
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+
+# 自动生成的索引和配置（首次构建时生成）
+docs-index.json
+config.json
+
+# 文档缓存（会从上游拉取）
+docs/
+docs-cache/
+
+# 本地测试
+*.tar.gz
+release/
+release-lite/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# 系统文件
+.DS_Store
+Thumbs.db
+
+# 临时文件
+*.tmp
+*.log

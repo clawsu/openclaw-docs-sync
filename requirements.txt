@@ -1,0 +1,8 @@
+# OpenClaw Docs Skill 依赖
+# 用于 GitHub Actions 构建
+
+# 无特殊依赖，仅使用 Python 标准库
+# Python >= 3.9
+
+# 可选：用于高级功能
+# PyYAML>=6.0  # 如需处理 YAML frontmatter
