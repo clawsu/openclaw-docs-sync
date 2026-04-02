@@ -87,7 +87,12 @@ jobs:
   # Job 2: 构建文档和 Skill 包
   build:
     needs: check-upstream
-    if: needs.check-upstream.outputs.has_update == 'true' || github.event.inputs.force_rebuild == 'true'
+    # 如果没有 check-upstream 输出，或者 force_rebuild 为 true，则运行
+    if: |
+      always() && 
+      (needs.check-upstream.outputs.has_update == 'true' || 
+       github.event.inputs.force_rebuild == 'true' ||
+       needs.check-upstream.result == 'skipped')
     runs-on: ubuntu-latest
     outputs:
       version: ${{ steps.version.outputs.version }}
@@ -111,6 +116,7 @@ jobs:
 
       - name: Clone and process docs
         run: |
+          set -e
           mkdir -p docs-cache
           
           # 使用 sparse checkout 只拉取 docs/
@@ -121,9 +127,13 @@ jobs:
           git sparse-checkout set docs
           
           # 移动 docs 内容
-          mv docs/* ../docs-cache/
+          mv docs/* ../docs-cache/ || true
           cd ..
           rm -rf docs-temp
+          
+          # 检查 docs-cache 内容
+          echo "📁 docs-cache 内容:"
+          ls -la docs-cache/ | head -20
 
       - name: Filter non-English docs
         run: |
@@ -148,11 +158,24 @@ jobs:
 
       - name: Clean documentation
         run: |
+          set -e
+          if [ ! -d "docs-cache" ]; then
+            echo "❌ docs-cache 目录不存在"
+            exit 1
+          fi
           python scripts/clean-docs.py docs-cache
 
       - name: Generate index
         run: |
+          set -e
           python scripts/build-index.py --docs-path docs-cache
+          
+          # 检查索引是否生成
+          if [ ! -f "docs-index.json" ]; then
+            echo "❌ 索引文件未生成"
+            exit 1
+          fi
+          echo "✅ 索引生成成功"
 
       - name: Prepare Skill package
         run: |
