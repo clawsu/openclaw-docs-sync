@@ -167,8 +167,9 @@ jobs:
           # 复制清洗后的文档（离线版）
           cp -r docs-cache release/docs
           
-          # 生成版本号
-          VERSION=$(date +%Y%m%d)-${{ needs.check-upstream.outputs.upstream_sha:0:7 }}
+          # 生成版本号（截取 SHA 前7位）
+          SHORT_SHA=$(echo "${{ needs.check-upstream.outputs.upstream_sha }}" | cut -c1-7)
+          VERSION=$(date +%Y%m%d)-${SHORT_SHA}
           echo "version=${VERSION}" >> $GITHUB_ENV
           echo "version=${VERSION}" >> $GITHUB_OUTPUT
 
@@ -208,10 +209,13 @@ jobs:
           echo "${{ needs.check-upstream.outputs.upstream_sha }}" > .last-sync-commit
           echo "${{ needs.check-upstream.outputs.upstream_date }}" > .last-sync-date
           
+          # 截取 SHA 前7位用于提交信息
+          SHORT_SHA=$(echo "${{ needs.check-upstream.outputs.upstream_sha }}" | cut -c1-7)
+          
           git config user.name "GitHub Actions"
           git config user.email "actions@github.com"
           git add .last-sync-commit .last-sync-date
-          git diff --cached --quiet || git commit -m "docs: sync to ${{ needs.check-upstream.outputs.upstream_sha:0:7 }}"
+          git diff --cached --quiet || git commit -m "docs: sync to ${SHORT_SHA}"
           git push
 
   # Job 3: 发布 Release
@@ -237,7 +241,7 @@ jobs:
           body: |
             ## 📚 OpenClaw 文档同步更新
             
-            **同步来源**: [openclaw/openclaw@${{ needs.check-upstream.outputs.upstream_sha:0:7 }}](https://github.com/openclaw/openclaw/commit/${{ needs.check-upstream.outputs.upstream_sha }})
+            **同步来源**: [openclaw/openclaw@${{ needs.check-upstream.outputs.upstream_sha }}](https://github.com/openclaw/openclaw/commit/${{ needs.check-upstream.outputs.upstream_sha }})
             
             **更新时间**: ${{ needs.check-upstream.outputs.upstream_date }}
             
