@@ -26,76 +26,24 @@ on:
   repository_dispatch:
     types: [docs-updated]
 
+  # 4. push 时触发（用于测试）
+  push:
+    branches: [main]
+
 env:
   UPSTREAM_REPO: https://github.com/openclaw/openclaw.git
   DOCS_BRANCH: main
   PYTHON_VERSION: '3.11'
 
 jobs:
-  # Job 1: 检查上游是否有更新
-  check-upstream:
+  # Job: 构建文档和 Skill 包
+  build-and-release:
     runs-on: ubuntu-latest
-    outputs:
-      has_update: ${{ steps.check.outputs.has_update }}
-      upstream_sha: ${{ steps.check.outputs.upstream_sha }}
-      upstream_date: ${{ steps.check.outputs.upstream_date }}
-    steps:
-      - name: Checkout sync repo
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-
-      - name: Get last sync commit
-        id: last-sync
-        run: |
-          if [ -f .last-sync-commit ]; then
-            echo "commit=$(cat .last-sync-commit)" >> $GITHUB_OUTPUT
-          else
-            echo "commit=none" >> $GITHUB_OUTPUT
-          fi
-
-      - name: Check upstream changes
-        id: check
-        run: |
-          # 克隆上游仓库（浅克隆）
-          git clone --depth 1 --filter=blob:none --sparse \
-            ${{ env.UPSTREAM_REPO }} upstream-temp
-          
-          cd upstream-temp
-          # 只检出 docs 目录
-          git sparse-checkout set docs
-          
-          # 获取最新 commit
-          UPSTREAM_SHA=$(git rev-parse HEAD)
-          UPSTREAM_DATE=$(git log -1 --format=%cd --date=iso)
-          
-          echo "upstream_sha=${UPSTREAM_SHA}" >> $GITHUB_OUTPUT
-          echo "upstream_date=${UPSTREAM_DATE}" >> $GITHUB_OUTPUT
-          
-          # 比较上次同步的 commit
-          if [ "${{ steps.last-sync.outputs.commit }}" = "${UPSTREAM_SHA}" ] && \
-             [ "${{ github.event.inputs.force_rebuild }}" != "true" ]; then
-            echo "has_update=false" >> $GITHUB_OUTPUT
-            echo "📦 文档已是最新，无需同步"
-          else
-            echo "has_update=true" >> $GITHUB_OUTPUT
-            echo "🔄 发现更新，需要同步"
-            echo "上次: ${{ steps.last-sync.outputs.commit }}"
-            echo "本次: ${UPSTREAM_SHA}"
-          fi
-
-  # Job 2: 构建文档和 Skill 包
-  build:
-    needs: check-upstream
-    # 如果没有 check-upstream 输出，或者 force_rebuild 为 true，则运行
-    if: |
-      always() && 
-      (needs.check-upstream.outputs.has_update == 'true' || 
-       github.event.inputs.force_rebuild == 'true' ||
-       needs.check-upstream.result == 'skipped')
-    runs-on: ubuntu-latest
+    permissions:
+      contents: write
     outputs:
       version: ${{ steps.version.outputs.version }}
+      has_update: ${{ steps.check.outputs.has_update }}
     steps:
       - name: Checkout sync repo
         uses: actions/checkout@v4
@@ -104,19 +52,49 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: ${{ env.PYTHON_VERSION }}
-          cache: 'pip'
 
-      - name: Install dependencies
-        run: |
-          pip install --upgrade pip
-          # 如果有 requirements.txt 可以安装
-          if [ -f requirements.txt ]; then
-            pip install -r requirements.txt
-          fi
-
-      - name: Clone and process docs
+      - name: Check upstream changes
+        id: check
         run: |
           set -e
+          
+          # 克隆上游仓库
+          git clone --depth 1 ${{ env.UPSTREAM_REPO }} upstream-temp
+          
+          cd upstream-temp
+          UPSTREAM_SHA=$(git rev-parse HEAD)
+          UPSTREAM_DATE=$(git log -1 --format=%cd --date=iso)
+          cd ..
+          
+          echo "upstream_sha=${UPSTREAM_SHA}" >> $GITHUB_OUTPUT
+          echo "upstream_date=${UPSTREAM_DATE}" >> $GITHUB_OUTPUT
+          
+          # 检查上次同步状态
+          if [ -f .last-sync-commit ]; then
+            LAST_SYNC=$(cat .last-sync-commit)
+          else
+            LAST_SYNC="none"
+          fi
+          
+          # 判断是否需要更新
+          if [ "${{ github.event.inputs.force_rebuild }}" = "true" ]; then
+            echo "has_update=true" >> $GITHUB_OUTPUT
+            echo "🔄 强制重新构建"
+          elif [ "$LAST_SYNC" = "$UPSTREAM_SHA" ]; then
+            echo "has_update=false" >> $GITHUB_OUTPUT
+            echo "📦 文档已是最新，无需同步"
+          else
+            echo "has_update=true" >> $GITHUB_OUTPUT
+            echo "🔄 发现更新，需要同步"
+            echo "上次: $LAST_SYNC"
+            echo "本次: $UPSTREAM_SHA"
+          fi
+
+      - name: Clone docs
+        if: steps.check.outputs.has_update == 'true' || github.event.inputs.force_rebuild == 'true'
+        run: |
+          set -e
+          rm -rf docs-cache
           mkdir -p docs-cache
           
           # 使用 sparse checkout 只拉取 docs/
@@ -127,16 +105,19 @@ jobs:
           git sparse-checkout set docs
           
           # 移动 docs 内容
-          mv docs/* ../docs-cache/ || true
+          if [ -d "docs" ]; then
+            mv docs/* ../docs-cache/
+          fi
           cd ..
           rm -rf docs-temp
           
-          # 检查 docs-cache 内容
           echo "📁 docs-cache 内容:"
-          ls -la docs-cache/ | head -20
+          ls -la docs-cache/
 
       - name: Filter non-English docs
+        if: steps.check.outputs.has_update == 'true' || github.event.inputs.force_rebuild == 'true'
         run: |
+          set -e
           cd docs-cache
           
           # 移除多语言目录
@@ -155,61 +136,72 @@ jobs:
           # 统计
           echo "📊 过滤后的文档统计:"
           find . -name "*.md" | wc -l
+          cd ..
 
       - name: Clean documentation
+        if: steps.check.outputs.has_update == 'true' || github.event.inputs.force_rebuild == 'true'
         run: |
           set -e
-          if [ ! -d "docs-cache" ]; then
-            echo "❌ docs-cache 目录不存在"
-            exit 1
-          fi
           python scripts/clean-docs.py docs-cache
 
       - name: Generate index
+        if: steps.check.outputs.has_update == 'true' || github.event.inputs.force_rebuild == 'true'
         run: |
           set -e
           python scripts/build-index.py --docs-path docs-cache
           
-          # 检查索引是否生成
           if [ ! -f "docs-index.json" ]; then
             echo "❌ 索引文件未生成"
             exit 1
           fi
           echo "✅ 索引生成成功"
+          ls -lh docs-index.json
 
       - name: Prepare Skill package
+        if: steps.check.outputs.has_update == 'true' || github.event.inputs.force_rebuild == 'true'
+        id: version
         run: |
+          set -e
+          
           # 创建发布目录
+          rm -rf release release-lite
           mkdir -p release
           
           # 复制必要文件
           cp -r scripts release/
-          cp SKILL.md README.md DISTRIBUTION.md release/
-          cp docs-index.json release/ 2>/dev/null || true
+          cp SKILL.md README.md DISTRIBUTION.md QUICKSTART.md GITHUB_ACTIONS_SETUP.md release/ 2>/dev/null || true
+          cp docs-index.json release/
           
           # 复制清洗后的文档（离线版）
           cp -r docs-cache release/docs
           
-          # 生成版本号（截取 SHA 前7位）
-          SHORT_SHA=$(echo "${{ needs.check-upstream.outputs.upstream_sha }}" | cut -c1-7)
+          # 生成版本号
+          SHORT_SHA=$(echo "${{ steps.check.outputs.upstream_sha }}" | cut -c1-7)
           VERSION=$(date +%Y%m%d)-${SHORT_SHA}
           echo "version=${VERSION}" >> $GITHUB_ENV
           echo "version=${VERSION}" >> $GITHUB_OUTPUT
+          echo "📦 版本号: ${VERSION}"
 
       - name: Build offline package
+        if: steps.check.outputs.has_update == 'true' || github.event.inputs.force_rebuild == 'true'
         run: |
+          set -e
           cd release
           tar -czf ../openclaw-docs-offline-${VERSION}.tar.gz \
             --exclude='__pycache__' \
             --exclude='*.pyc' \
             .
           cd ..
-          
-          # 创建轻量版（不含 docs）
+          ls -lh openclaw-docs-offline-*.tar.gz
+
+      - name: Build lite package
+        if: steps.check.outputs.has_update == 'true' || github.event.inputs.force_rebuild == 'true'
+        run: |
+          set -e
           mkdir -p release-lite
           cp -r release/scripts release-lite/
-          cp release/SKILL.md release/README.md release/DISTRIBUTION.md release-lite/
-          cp release/docs-index.json release-lite/ 2>/dev/null || true
+          cp release/SKILL.md release/README.md release/DISTRIBUTION.md release/QUICKSTART.md release/GITHUB_ACTIONS_SETUP.md release-lite/ 2>/dev/null || true
+          cp release/docs-index.json release-lite/
           
           cd release-lite
           tar -czf ../openclaw-docs-lite-${VERSION}.tar.gz \
@@ -217,8 +209,10 @@ jobs:
             --exclude='*.pyc' \
             .
           cd ..
+          ls -lh openclaw-docs-lite-*.tar.gz
 
       - name: Upload artifacts
+        if: steps.check.outputs.has_update == 'true' || github.event.inputs.force_rebuild == 'true'
         uses: actions/upload-artifact@v4
         with:
           name: skill-packages
@@ -227,46 +221,20 @@ jobs:
             openclaw-docs-lite-*.tar.gz
           retention-days: 30
 
-      - name: Save sync state
-        run: |
-          echo "${{ needs.check-upstream.outputs.upstream_sha }}" > .last-sync-commit
-          echo "${{ needs.check-upstream.outputs.upstream_date }}" > .last-sync-date
-          
-          # 截取 SHA 前7位用于提交信息
-          SHORT_SHA=$(echo "${{ needs.check-upstream.outputs.upstream_sha }}" | cut -c1-7)
-          
-          git config user.name "GitHub Actions"
-          git config user.email "actions@github.com"
-          git add .last-sync-commit .last-sync-date
-          git diff --cached --quiet || git commit -m "docs: sync to ${SHORT_SHA}"
-          git push
-
-  # Job 3: 发布 Release
-  release:
-    needs: [check-upstream, build]
-    if: |
-      (needs.check-upstream.outputs.has_update == 'true' || github.event.inputs.force_rebuild == 'true') &&
-      github.event.inputs.skip_release != 'true'
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
-    steps:
-      - name: Download artifacts
-        uses: actions/download-artifact@v4
-        with:
-          name: skill-packages
-
       - name: Create Release
+        if: |
+          (steps.check.outputs.has_update == 'true' || github.event.inputs.force_rebuild == 'true') &&
+          github.event.inputs.skip_release != 'true'
         uses: softprops/action-gh-release@v1
         with:
-          tag_name: v${{ needs.build.outputs.version }}
-          name: OpenClaw Docs ${{ needs.build.outputs.version }}
+          tag_name: v${{ steps.version.outputs.version }}
+          name: OpenClaw Docs ${{ steps.version.outputs.version }}
           body: |
             ## 📚 OpenClaw 文档同步更新
             
-            **同步来源**: [openclaw/openclaw@${{ needs.check-upstream.outputs.upstream_sha }}](https://github.com/openclaw/openclaw/commit/${{ needs.check-upstream.outputs.upstream_sha }})
+            **同步来源**: [openclaw/openclaw@${{ steps.check.outputs.upstream_sha }}](https://github.com/openclaw/openclaw/commit/${{ steps.check.outputs.upstream_sha }})
             
-            **更新时间**: ${{ needs.check-upstream.outputs.upstream_date }}
+            **更新时间**: ${{ steps.check.outputs.upstream_date }}
             
             ### 📦 包含内容
             - ✅ 仅英文文档（已过滤 zh-CN, ja-JP 等）
@@ -296,20 +264,27 @@ jobs:
           files: |
             openclaw-docs-offline-*.tar.gz
             openclaw-docs-lite-*.tar.gz
-          generate_release_notes: false
 
-  # Job 4: 通知（可选）
-  notify:
-    needs: [check-upstream, build, release]
-    if: always() && needs.check-upstream.outputs.has_update == 'true'
-    runs-on: ubuntu-latest
-    steps:
-      - name: Send notification
+      - name: Save sync state
+        if: steps.check.outputs.has_update == 'true' || github.event.inputs.force_rebuild == 'true'
         run: |
-          if [ "${{ needs.build.result }}" = "success" ] && [ "${{ needs.release.result }}" = "success" ]; then
-            echo "✅ 文档同步成功！"
-            echo "版本: ${{ needs.build.outputs.version }}"
+          set -e
+          echo "${{ steps.check.outputs.upstream_sha }}" > .last-sync-commit
+          echo "${{ steps.check.outputs.upstream_date }}" > .last-sync-date
+          
+          git config user.name "GitHub Actions"
+          git config user.email "actions@github.com"
+          git add .last-sync-commit .last-sync-date
+          
+          SHORT_SHA=$(echo "${{ steps.check.outputs.upstream_sha }}" | cut -c1-7)
+          git diff --cached --quiet || git commit -m "docs: sync to ${SHORT_SHA}"
+          git push
+
+      - name: Report status
+        if: always()
+        run: |
+          if [ "${{ job.status }}" = "success" ]; then
+            echo "✅ 构建成功！"
           else
-            echo "❌ 文档同步失败"
-            exit 1
+            echo "❌ 构建失败"
           fi
