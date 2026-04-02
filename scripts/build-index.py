@@ -82,15 +82,18 @@ def extract_summary(file_path):
         return ""
 
 
-def build_index():
+def build_index(docs_dir=None):
     """构建文档索引"""
+    if docs_dir is None:
+        docs_dir = DOCS_DIR
+    
     index = {
         "total_files": 0,
         "categories": {},
         "files": []
     }
     
-    for root, dirs, files in os.walk(DOCS_DIR):
+    for root, dirs, files in os.walk(docs_dir):
         # 跳过隐藏目录
         dirs[:] = [d for d in dirs if not d.startswith('.')]
         
@@ -99,7 +102,7 @@ def build_index():
                 continue
                 
             file_path = os.path.join(root, file)
-            rel_path = os.path.relpath(file_path, DOCS_DIR)
+            rel_path = os.path.relpath(file_path, docs_dir)
             
             # 获取分类
             category = rel_path.split('/')[0] if '/' in rel_path else 'root'
@@ -132,11 +135,10 @@ def main():
     parser.add_argument('--docs-path', default=DOCS_DIR, help='Path to docs directory')
     args = parser.parse_args()
     
-    global DOCS_DIR
-    DOCS_DIR = args.docs_path
+    docs_path = args.docs_path
     
-    print(f"🔍 正在扫描文档目录: {DOCS_DIR}")
-    index = build_index()
+    print(f"🔍 正在扫描文档目录: {docs_path}")
+    index = build_index(docs_path)
     
     # 保存索引
     output_path = SKILL_DIR / "docs-index.json"
