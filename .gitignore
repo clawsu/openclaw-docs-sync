@@ -12,7 +12,6 @@ docs-index.json
 config.json
 
 # 文档缓存（会从上游拉取）
-docs/
 docs-cache/
 
 # 本地测试
